@@ -1,5 +1,5 @@
 /*
- * iperf, Copyright (c) 2014-2017, The Regents of the University of
+ * iperf, Copyright (c) 2014-2018, The Regents of the University of
  * California, through Lawrence Berkeley National Laboratory (subject
  * to receipt of any required approvals from the U.S. Dept. of
  * Energy).  All rights reserved.
@@ -41,6 +41,7 @@
 #include "iperf_api.h"
 #include "iperf_util.h"
 #include "iperf_locale.h"
+#include "iperf_time.h"
 #include "net.h"
 #include "timer.h"
 
@@ -51,9 +52,12 @@
 #endif /* HAVE_TCP_CONGESTION */
 
 int
-iperf_create_streams(struct iperf_test *test)
+iperf_create_streams(struct iperf_test *test, int sender)
 {
     int i, s;
+#if defined(HAVE_TCP_CONGESTION)
+    int saved_errno;
+#endif /* HAVE_TCP_CONGESTION */
     struct iperf_stream *sp;
 
     int orig_bind_port = test->bind_port;
@@ -69,7 +73,9 @@ iperf_create_streams(struct iperf_test *test)
 	if (test->protocol->id == Ptcp) {
 	    if (test->congestion) {
 		if (setsockopt(s, IPPROTO_TCP, TCP_CONGESTION, test->congestion, strlen(test->congestion)) < 0) {
+		    saved_errno = errno;
 		    close(s);
+		    errno = saved_errno;
 		    i_errno = IESETCONGESTION;
 		    return -1;
 		} 
@@ -78,7 +84,9 @@ iperf_create_streams(struct iperf_test *test)
 		socklen_t len = TCP_CA_NAME_MAX;
 		char ca[TCP_CA_NAME_MAX + 1];
 		if (getsockopt(s, IPPROTO_TCP, TCP_CONGESTION, ca, &len) < 0) {
+		    saved_errno = errno;
 		    close(s);
+		    errno = saved_errno;
 		    i_errno = IESETCONGESTION;
 		    return -1;
 		}
@@ -90,13 +98,13 @@ iperf_create_streams(struct iperf_test *test)
 	}
 #endif /* HAVE_TCP_CONGESTION */
 
-	if (test->sender)
+	if (sender)
 	    FD_SET(s, &test->write_set);
 	else
 	    FD_SET(s, &test->read_set);
 	if (s > test->max_fd) test->max_fd = s;
 
-        sp = iperf_new_stream(test, s);
+        sp = iperf_new_stream(test, s, sender);
         if (!sp)
             return -1;
 
@@ -109,7 +117,7 @@ iperf_create_streams(struct iperf_test *test)
 }
 
 static void
-test_timer_proc(TimerClientData client_data, struct timeval *nowP)
+test_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 {
     struct iperf_test *test = client_data.p;
 
@@ -118,7 +126,7 @@ test_timer_proc(TimerClientData client_data, struct timeval *nowP)
 }
 
 static void
-client_stats_timer_proc(TimerClientData client_data, struct timeval *nowP)
+client_stats_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 {
     struct iperf_test *test = client_data.p;
 
@@ -129,7 +137,7 @@ client_stats_timer_proc(TimerClientData client_data, struct timeval *nowP)
 }
 
 static void
-client_reporter_timer_proc(TimerClientData client_data, struct timeval *nowP)
+client_reporter_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 {
     struct iperf_test *test = client_data.p;
 
@@ -142,10 +150,10 @@ client_reporter_timer_proc(TimerClientData client_data, struct timeval *nowP)
 static int
 create_client_timers(struct iperf_test * test)
 {
-    struct timeval now;
+    struct iperf_time now;
     TimerClientData cd;
 
-    if (gettimeofday(&now, NULL) < 0) {
+    if (iperf_time_now(&now) < 0) {
 	i_errno = IEINITTEST;
 	return -1;
     }
@@ -177,7 +185,7 @@ create_client_timers(struct iperf_test * test)
 }
 
 static void
-client_omit_timer_proc(TimerClientData client_data, struct timeval *nowP)
+client_omit_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 {
     struct iperf_test *test = client_data.p;
 
@@ -197,14 +205,14 @@ client_omit_timer_proc(TimerClientData client_data, struct timeval *nowP)
 static int
 create_client_omit_timer(struct iperf_test * test)
 {
-    struct timeval now;
+    struct iperf_time now;
     TimerClientData cd;
 
     if (test->omit == 0) {
 	test->omit_timer = NULL;
         test->omitting = 0;
     } else {
-	if (gettimeofday(&now, NULL) < 0) {
+	if (iperf_time_now(&now) < 0) {
 	    i_errno = IEINITTEST;
 	    return -1;
 	}
@@ -244,7 +252,14 @@ iperf_handle_message_client(struct iperf_test *test)
                 test->on_connect(test);
             break;
         case CREATE_STREAMS:
-            if (iperf_create_streams(test) < 0)
+            if (test->mode == BIDIRECTIONAL)
+            {
+                if (iperf_create_streams(test, 1) < 0)
+                    return -1;
+                if (iperf_create_streams(test, 0) < 0)
+                    return -1;
+            }
+            else if (iperf_create_streams(test, test->mode) < 0)
                 return -1;
             break;
         case TEST_START:
@@ -254,7 +269,7 @@ iperf_handle_message_client(struct iperf_test *test)
                 return -1;
             if (create_client_omit_timer(test) < 0)
                 return -1;
-	    if (!test->reverse)
+	    if (test->mode)
 		if (iperf_create_send_timers(test) < 0)
 		    return -1;
             break;
@@ -340,10 +355,20 @@ iperf_connect(struct iperf_test *test)
 
     len = sizeof(opt);
     if (getsockopt(test->ctrl_sck, IPPROTO_TCP, TCP_MAXSEG, &opt, &len) < 0) {
-	test->ctrl_sck_mss = 0;
+        test->ctrl_sck_mss = 0;
     }
     else {
-	test->ctrl_sck_mss = opt;
+        if (opt > 0 && opt <= MAX_UDP_BLOCKSIZE) {
+            test->ctrl_sck_mss = opt;
+        }
+        else {
+            char str[128];
+            snprintf(str, sizeof(str),
+                     "Ignoring nonsense TCP MSS %d", opt);
+            warning(str);
+
+            test->ctrl_sck_mss = 0;
+        }
     }
 
     if (test->verbose) {
@@ -408,12 +433,12 @@ iperf_client_end(struct iperf_test *test)
     /* show final summary */
     test->reporter_callback(test);
 
+    if (iperf_set_send_state(test, IPERF_DONE) != 0)
+        return -1;
+
     /* Close control socket */
     if (test->ctrl_sck)
         close(test->ctrl_sck);
-
-    if (iperf_set_send_state(test, IPERF_DONE) != 0)
-        return -1;
 
     return 0;
 }
@@ -425,7 +450,7 @@ iperf_run_client(struct iperf_test * test)
     int startup;
     int result = 0;
     fd_set read_set, write_set;
-    struct timeval now;
+    struct iperf_time now;
     struct timeval* timeout = NULL;
     struct iperf_stream *sp;
 
@@ -458,7 +483,7 @@ iperf_run_client(struct iperf_test * test)
     while (test->state != IPERF_DONE) {
 	memcpy(&read_set, &test->read_set, sizeof(fd_set));
 	memcpy(&write_set, &test->write_set, sizeof(fd_set));
-	(void) gettimeofday(&now, NULL);
+	iperf_time_now(&now);
 	timeout = tmr_timeout(&now);
 	result = select(test->max_fd + 1, &read_set, &write_set, NULL, timeout);
 	if (result < 0 && errno != EINTR) {
@@ -488,18 +513,26 @@ iperf_run_client(struct iperf_test * test)
 		}
 	    }
 
-	    if (test->reverse) {
-		// Reverse mode. Client receives.
-		if (iperf_recv(test, &read_set) < 0)
-		    return -1;
+
+	    if (test->mode == BIDIRECTIONAL)
+	    {
+                if (iperf_send(test, &write_set) < 0)
+                    return -1;
+                if (iperf_recv(test, &read_set) < 0)
+                    return -1;
+	    } else if (test->mode == SENDER) {
+                // Regular mode. Client sends.
+                if (iperf_send(test, &write_set) < 0)
+                    return -1;
 	    } else {
-		// Regular mode. Client sends.
-		if (iperf_send(test, &write_set) < 0)
-		    return -1;
+                // Reverse mode. Client receives.
+                if (iperf_recv(test, &read_set) < 0)
+                    return -1;
 	    }
 
+
             /* Run the timers. */
-            (void) gettimeofday(&now, NULL);
+            iperf_time_now(&now);
             tmr_run(&now);
 
 	    /* Is the test done yet? */
@@ -528,7 +561,7 @@ iperf_run_client(struct iperf_test * test)
 	// deadlock where the server side fills up its pipe(s)
 	// and gets blocked, so it can't receive state changes
 	// from the client side.
-	else if (test->reverse && test->state == TEST_END) {
+	else if (test->mode == RECEIVER && test->state == TEST_END) {
 	    if (iperf_recv(test, &read_set) < 0)
 		return -1;
 	}

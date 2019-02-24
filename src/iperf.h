@@ -1,5 +1,5 @@
 /*
- * iperf, Copyright (c) 2014, 2015, 2016, 2017, The Regents of the University of
+ * iperf, Copyright (c) 2014-2018, The Regents of the University of
  * California, through Lawrence Berkeley National Laboratory (subject
  * to receipt of any required approvals from the U.S. Dept. of
  * Energy).  All rights reserved.
@@ -36,7 +36,9 @@
 #endif
 #include <sys/select.h>
 #include <sys/socket.h>
-#define _GNU_SOURCE
+#ifndef _GNU_SOURCE
+# define _GNU_SOURCE
+#endif
 #include <netinet/tcp.h>
 
 #if defined(HAVE_CPUSET_SETAFFINITY)
@@ -44,17 +46,35 @@
 #include <sys/cpuset.h>
 #endif /* HAVE_CPUSET_SETAFFINITY */
 
+#if defined(HAVE_INTTYPES_H)
+# include <inttypes.h>
+#else
+# ifndef PRIu64
+#  if sizeof(long) == 8
+#   define PRIu64		"lu"
+#  else
+#   define PRIu64		"llu"
+#  endif
+# endif
+#endif
+
 #include "timer.h"
 #include "queue.h"
 #include "cjson.h"
+#include "iperf_time.h"
+
+#if defined(HAVE_SSL)
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#endif // HAVE_SSL
 
 typedef uint64_t iperf_size_t;
 
 struct iperf_interval_results
 {
     iperf_size_t bytes_transferred; /* bytes transfered in this interval */
-    struct timeval interval_start_time;
-    struct timeval interval_end_time;
+    struct iperf_time interval_start_time;
+    struct iperf_time interval_end_time;
     float     interval_duration;
 
     /* for UDP */
@@ -100,9 +120,9 @@ struct iperf_stream_result
     int stream_sum_rtt;
     int stream_count_rtt;
     int stream_max_snd_cwnd;
-    struct timeval start_time;
-    struct timeval end_time;
-    struct timeval start_time_fixed;
+    struct iperf_time start_time;
+    struct iperf_time end_time;
+    struct iperf_time start_time_fixed;
     double sender_time;
     double receiver_time;
     TAILQ_HEAD(irlisthead, iperf_interval_results) interval_results;
@@ -127,7 +147,12 @@ struct iperf_settings
     iperf_size_t blocks;            /* number of blocks (packets) to send */
     char      unit_format;          /* -f */
     int       num_ostreams;         /* SCTP initmsg settings */
+#if defined(HAVE_SSL)
     char      *authtoken;           /* Authentication token */
+    char      *client_username;
+    char      *client_password;
+    EVP_PKEY  *client_rsa_pubkey;
+#endif // HAVE_SSL
     int	      connect_timeout;	    /* socket connection timeout, in ms */
 };
 
@@ -142,6 +167,7 @@ struct iperf_stream
     int       remote_port;
     int       socket;
     int       id;
+    int       sender;
 	/* XXX: is settings just a pointer to the same struct in iperf_test? if not, 
 		should it be? */
     struct iperf_settings *settings;	/* pointer to structure settings */
@@ -209,11 +235,18 @@ struct xbind_entry {
     TAILQ_ENTRY(xbind_entry) link;
 };
 
+enum iperf_mode {
+	SENDER = 1,
+	RECEIVER = 0,
+	BIDIRECTIONAL = -1
+};
+
 struct iperf_test
 {
     char      role;                             /* 'c' lient or 's' erver */
-    int       sender;                           /* client & !reverse or server & reverse */
+    enum iperf_mode mode;
     int       sender_has_retransmits;
+    int       other_side_has_retransmits;       /* used if mode == BIDIRECTIONAL */
     struct protocol *protocol;
     signed char state;
     char     *server_hostname;                  /* -c option */
@@ -230,6 +263,7 @@ struct iperf_test
     cpuset_t cpumask;
 #endif /* HAVE_CPUSET_SETAFFINITY */
     char     *title;				/* -T option */
+    char     *extra_data;			/* --extra-data */
     char     *congestion;			/* -C option */
     char     *congestion_used;			/* what was actually used */
     char     *remote_congestion_used;		/* what the other side used */
@@ -243,14 +277,18 @@ struct iperf_test
     int       prot_listener;
 
     int	      ctrl_sck_mss;			/* MSS for the control channel */
-    char     *server_rsa_private_key;
-    char     *server_authorized_users;
+
+#if defined(HAVE_SSL)
+    char      *server_authorized_users;
+    EVP_PKEY  *server_rsa_private_key;
+#endif // HAVE_SSL
 
     /* boolean variables for Options */
     int       daemon;                           /* -D option */
     int       one_off;                          /* -1 option */
     int       no_delay;                         /* -N option */
     int       reverse;                          /* -R option */
+    int       bidirectional;                    /* --bidirectional */
     int	      verbose;                          /* -V option - verbose mode */
     int	      json_output;                      /* -J option - JSON output */
     int	      zerocopy;                         /* -Z option - use sendfile */
@@ -259,6 +297,7 @@ struct iperf_test
     int	      udp_counters_64bit;		/* --use-64-bit-udp-counters */
     int       forceflush; /* --forceflush - flushing output at every interval */
     int	      multisend;
+    int	      repeating_payload;                /* --repeating-payload */
 
     char     *json_output_string; /* rendered JSON output if json_output is set */
     /* Select related parameters */
@@ -285,6 +324,10 @@ struct iperf_test
 
     iperf_size_t bytes_sent;
     iperf_size_t blocks_sent;
+
+    iperf_size_t bytes_received;
+    iperf_size_t blocks_received;
+
     char      cookie[COOKIE_SIZE];
 //    struct iperf_stream *streams;               /* pointer to list of struct stream */
     SLIST_HEAD(slisthead, iperf_stream) streams;

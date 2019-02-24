@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------- 
- * iperf, Copyright (c) 2014, 2016, 2017, The Regents of the University of
+ * iperf, Copyright (c) 2014-2018, The Regents of the University of
  * California, through Lawrence Berkeley National Laboratory (subject
  * to receipt of any required approvals from the U.S. Dept. of
  * Energy).  All rights reserved.
@@ -104,7 +104,7 @@ const char usage_longstr[] = "Usage: iperf3 [-s|-c host] [options]\n"
 #if defined(HAVE_CPU_AFFINITY)
                            "  -A, --affinity n/n,m      set CPU affinity\n"
 #endif /* HAVE_CPU_AFFINITY */
-                           "  -B, --bind      <host>    bind to a specific interface\n"
+                           "  -B, --bind      <host>    bind to the interface associated with the address <host>\n"
                            "  -V, --verbose             more detailed output\n"
                            "  -J, --json                output in JSON format\n"
                            "  --logfile f               send output to a log file\n"
@@ -143,11 +143,13 @@ const char usage_longstr[] = "Usage: iperf3 [-s|-c host] [options]\n"
                            "  -t, --time      #         time in seconds to transmit for (default %d secs)\n"
                            "  -n, --bytes     #[KMG]    number of bytes to transmit (instead of -t)\n"
                            "  -k, --blockcount #[KMG]   number of blocks (packets) to transmit (instead of -t or -n)\n"
-                           "  -l, --len       #[KMG]    length of buffer to read or write\n"
+                           "  -l, --length    #[KMG]    length of buffer to read or write\n"
 			   "                            (default %d KB for TCP, dynamic or %d for UDP)\n"
                            "  --cport         <port>    bind to a specific client port (TCP and UDP, default: ephemeral port)\n"
                            "  -P, --parallel  #         number of parallel client streams to run\n"
                            "  -R, --reverse             run in reverse mode (server sends, client receives)\n"
+                           "  --bidir                   run in bidirectional mode.\n"
+                           "                            Client and server send and receive data.\n"
                            "  -w, --window    #[KMG]    set window size / socket buffer size\n"
 #if defined(HAVE_TCP_CONGESTION)
                            "  -C, --congestion <algo>   set TCP congestion control algorithm (Linux and FreeBSD only)\n"
@@ -156,16 +158,24 @@ const char usage_longstr[] = "Usage: iperf3 [-s|-c host] [options]\n"
                            "  -N, --no-delay            set TCP/SCTP no delay, disabling Nagle's Algorithm\n"
                            "  -4, --version4            only use IPv4\n"
                            "  -6, --version6            only use IPv6\n"
-                           "  -S, --tos N               set the IP type of service, 0-255\n"
-                           "  --dscp N or --dscp val    set the IP dscp value, either 0-63 or symbolic\n"
+                           "  -S, --tos N               set the IP type of service, 0-255.\n"
+                           "                            The usual prefixes for octal and hex can be used,\n"
+                           "                            i.e. 52, 064 and 0x34 all specify the same value.\n"
+
+                           "  --dscp N or --dscp val    set the IP dscp value, either 0-63 or symbolic.\n"
+                           "                            Numeric values can be specified in decimal,\n"
+                           "                            octal and hex (see --tos above).\n"
 #if defined(HAVE_FLOWLABEL)
                            "  -L, --flowlabel N         set the IPv6 flow label (only supported on Linux)\n"
 #endif /* HAVE_FLOWLABEL */
                            "  -Z, --zerocopy            use a 'zero copy' method of sending data\n"
                            "  -O, --omit N              omit the first n seconds\n"
                            "  -T, --title str           prefix every output line with this string\n"
+                           "  --extra-data str          data string to include in client and server JSON\n"
                            "  --get-server-output       get results from server\n"
                            "  --udp-counters-64bit      use 64-bit counters in UDP test packets\n"
+                           "  --repeating-payload       use repeating pattern in payload, instead of\n"
+                           "                            randomized payload (like in iperf2)\n"
 #if defined(HAVE_SSL)
                            "  --username                username for authentication\n"
                            "  --rsa-public-key-path     path to the RSA public key used to encrypt\n"
@@ -304,47 +314,62 @@ const char report_read_length_times[] =
 const char report_bw_header[] =
 "[ ID] Interval           Transfer     Bitrate\n";
 
+const char report_bw_header_bidir[] =
+"[ ID][Role] Interval           Transfer     Bitrate\n";
+
 const char report_bw_retrans_header[] =
 "[ ID] Interval           Transfer     Bitrate         Retr\n";
+
+const char report_bw_retrans_header_bidir[] =
+"[ ID][Role] Interval           Transfer     Bitrate         Retr\n";
 
 const char report_bw_retrans_cwnd_header[] =
 "[ ID] Interval           Transfer     Bitrate         Retr  Cwnd\n";
 
+const char report_bw_retrans_cwnd_header_bidir[] =
+"[ ID][Role] Interval           Transfer     Bitrate         Retr  Cwnd\n";
+
 const char report_bw_udp_header[] =
 "[ ID] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams\n";
+
+const char report_bw_udp_header_bidir[] =
+"[ ID][Role] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams\n";
 
 const char report_bw_udp_sender_header[] =
 "[ ID] Interval           Transfer     Bitrate         Total Datagrams\n";
 
+const char report_bw_udp_sender_header_bidir[] =
+"[ ID][Role] Interval           Transfer     Bitrate         Total Datagrams\n";
+
 const char report_bw_format[] =
-"[%3d] %6.2f-%-6.2f sec  %ss  %ss/sec                  %s\n";
+"[%3d]%s %6.2f-%-6.2f sec  %ss  %ss/sec                  %s\n";
 
 const char report_bw_retrans_format[] =
-"[%3d] %6.2f-%-6.2f sec  %ss  %ss/sec  %3u             %s\n";
+"[%3d]%s %6.2f-%-6.2f sec  %ss  %ss/sec  %3u             %s\n";
 
 const char report_bw_retrans_cwnd_format[] =
-"[%3d] %6.2f-%-6.2f sec  %ss  %ss/sec  %3u   %ss       %s\n";
+"[%3d]%s %6.2f-%-6.2f sec  %ss  %ss/sec  %3u   %ss       %s\n";
 
 const char report_bw_udp_format[] =
-"[%3d] %6.2f-%-6.2f sec  %ss  %ss/sec  %5.3f ms  %d/%d (%.2g%%)  %s\n";
+"[%3d]%s %6.2f-%-6.2f sec  %ss  %ss/sec  %5.3f ms  %d/%d (%.2g%%)  %s\n";
 
 const char report_bw_udp_sender_format[] =
-"[%3d] %6.2f-%-6.2f sec  %ss  %ss/sec  %d  %s\n";
+"[%3d]%s %6.2f-%-6.2f sec  %ss  %ss/sec %s %d  %s\n";
 
 const char report_summary[] =
 "Test Complete. Summary Results:\n";
 
 const char report_sum_bw_format[] =
-"[SUM] %6.2f-%-6.2f sec  %ss  %ss/sec                  %s\n";
+"[SUM]%s %6.2f-%-6.2f sec  %ss  %ss/sec                  %s\n";
 
 const char report_sum_bw_retrans_format[] =
-"[SUM] %6.2f-%-6.2f sec  %ss  %ss/sec  %3d             %s\n";
+"[SUM]%s %6.2f-%-6.2f sec  %ss  %ss/sec  %3d             %s\n";
 
 const char report_sum_bw_udp_format[] =
-"[SUM] %6.2f-%-6.2f sec  %ss  %ss/sec  %5.3f ms  %d/%d (%.2g%%)  %s\n";
+"[SUM]%s %6.2f-%-6.2f sec  %ss  %ss/sec  %5.3f ms  %d/%d (%.2g%%)  %s\n";
 
 const char report_sum_bw_udp_sender_format[] =
-"[SUM] %6.2f-%-6.2f sec  %ss  %ss/sec  %d  %s\n";
+"[SUM]%s %6.2f-%-6.2f sec  %ss  %ss/sec %s %d  %s\n";
 
 const char report_omitted[] = "(omitted)";
 
@@ -352,10 +377,10 @@ const char report_bw_separator[] =
 "- - - - - - - - - - - - - - - - - - - - - - - - -\n";
 
 const char report_outoforder[] =
-"[%3d] %4.1f-%4.1f sec  %d datagrams received out-of-order\n";
+"[%3d]%s %4.1f-%4.1f sec  %d datagrams received out-of-order\n";
 
 const char report_sum_outoforder[] =
-"[SUM] %4.1f-%4.1f sec  %d datagrams received out-of-order\n";
+"[SUM]%s %4.1f-%4.1f sec  %d datagrams received out-of-order\n";
 
 const char report_peer[] =
 "[%3d] local %s port %u connected with %s port %u\n";
@@ -386,7 +411,9 @@ const char report_remote[] = "remote";
 const char report_sender[] = "sender";
 const char report_receiver[] = "receiver";
 const char report_sender_not_available_format[] = "[%3d] (sender statistics not available)\n";
+const char report_sender_not_available_summary_format[] = "[%3s] (sender statistics not available)\n";
 const char report_receiver_not_available_format[] = "[%3d] (receiver statistics not available)\n";
+const char report_receiver_not_available_summary_format[] = "[%3s] (receiver statistics not available)\n";
 
 #if defined(linux)
 const char report_tcpInfo[] =

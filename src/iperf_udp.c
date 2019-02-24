@@ -1,5 +1,5 @@
 /*
- * iperf, Copyright (c) 2014, 2016, 2017, The Regents of the University of
+ * iperf, Copyright (c) 2014-2018, The Regents of the University of
  * California, through Lawrence Berkeley National Laboratory (subject
  * to receipt of any required approvals from the U.S. Dept. of
  * Energy).  All rights reserved.
@@ -48,6 +48,12 @@
 #include "cjson.h"
 #include "portable_endian.h"
 
+#if defined(HAVE_INTTYPES_H)
+# include <inttypes.h>
+#else
+# define PRIu64		"llu"
+#endif
+
 /* iperf_udp_recv
  *
  * receives the data for UDP
@@ -60,7 +66,7 @@ iperf_udp_recv(struct iperf_stream *sp)
     int       r;
     int       size = sp->settings->blksize;
     double    transit = 0, d = 0;
-    struct timeval sent_time, arrival_time;
+    struct iperf_time sent_time, arrival_time, temp_time;
 
     r = Nread(sp->socket, sp->buffer, size, Pudp);
 
@@ -72,97 +78,105 @@ iperf_udp_recv(struct iperf_stream *sp)
     if (r <= 0)
         return r;
 
-    sp->result->bytes_received += r;
-    sp->result->bytes_received_this_interval += r;
+    /* Only count bytes received while we're in the correct state. */
+    if (sp->test->state == TEST_RUNNING) {
+	sp->result->bytes_received += r;
+	sp->result->bytes_received_this_interval += r;
 
-    if (sp->test->udp_counters_64bit) {
-	memcpy(&sec, sp->buffer, sizeof(sec));
-	memcpy(&usec, sp->buffer+4, sizeof(usec));
-	memcpy(&pcount, sp->buffer+8, sizeof(pcount));
-	sec = ntohl(sec);
-	usec = ntohl(usec);
-	pcount = be64toh(pcount);
-	sent_time.tv_sec = sec;
-	sent_time.tv_usec = usec;
-    }
-    else {
-	uint32_t pc;
-	memcpy(&sec, sp->buffer, sizeof(sec));
-	memcpy(&usec, sp->buffer+4, sizeof(usec));
-	memcpy(&pc, sp->buffer+8, sizeof(pc));
-	sec = ntohl(sec);
-	usec = ntohl(usec);
-	pcount = ntohl(pc);
-	sent_time.tv_sec = sec;
-	sent_time.tv_usec = usec;
-    }
+	if (sp->test->udp_counters_64bit) {
+	    memcpy(&sec, sp->buffer, sizeof(sec));
+	    memcpy(&usec, sp->buffer+4, sizeof(usec));
+	    memcpy(&pcount, sp->buffer+8, sizeof(pcount));
+	    sec = ntohl(sec);
+	    usec = ntohl(usec);
+	    pcount = be64toh(pcount);
+	    sent_time.secs = sec;
+	    sent_time.usecs = usec;
+	}
+	else {
+	    uint32_t pc;
+	    memcpy(&sec, sp->buffer, sizeof(sec));
+	    memcpy(&usec, sp->buffer+4, sizeof(usec));
+	    memcpy(&pc, sp->buffer+8, sizeof(pc));
+	    sec = ntohl(sec);
+	    usec = ntohl(usec);
+	    pcount = ntohl(pc);
+	    sent_time.secs = sec;
+	    sent_time.usecs = usec;
+	}
 
-    if (sp->test->debug)
-	fprintf(stderr, "pcount %llu packet_count %d\n", pcount, sp->packet_count);
-
-    /*
-     * Try to handle out of order packets.  The way we do this
-     * uses a constant amount of storage but might not be
-     * correct in all cases.  In particular we seem to have the
-     * assumption that packets can't be duplicated in the network,
-     * because duplicate packets will possibly cause some problems here.
-     *
-     * First figure out if the sequence numbers are going forward.
-     * Note that pcount is the sequence number read from the packet,
-     * and sp->packet_count is the highest sequence number seen so
-     * far (so we're expecting to see the packet with sequence number
-     * sp->packet_count + 1 arrive next).
-     */
-    if (pcount >= sp->packet_count + 1) {
-
-	/* Forward, but is there a gap in sequence numbers? */
-        if (pcount > sp->packet_count + 1) {
-	    /* There's a gap so count that as a loss. */
-            sp->cnt_error += (pcount - 1) - sp->packet_count;
-        }
-	/* Update the highest sequence number seen so far. */
-        sp->packet_count = pcount;
-    } else {
-
-	/* 
-	 * Sequence number went backward (or was stationary?!?).
-	 * This counts as an out-of-order packet.
-	 */
-        sp->outoforder_packets++;
+	if (sp->test->debug)
+	    fprintf(stderr, "pcount %" PRIu64 " packet_count %d\n", pcount, sp->packet_count);
 
 	/*
-	 * If we have lost packets, then the fact that we are now
-	 * seeing an out-of-order packet offsets a prior sequence
-	 * number gap that was counted as a loss.  So we can take
-	 * away a loss.
+	 * Try to handle out of order packets.  The way we do this
+	 * uses a constant amount of storage but might not be
+	 * correct in all cases.  In particular we seem to have the
+	 * assumption that packets can't be duplicated in the network,
+	 * because duplicate packets will possibly cause some problems here.
+	 *
+	 * First figure out if the sequence numbers are going forward.
+	 * Note that pcount is the sequence number read from the packet,
+	 * and sp->packet_count is the highest sequence number seen so
+	 * far (so we're expecting to see the packet with sequence number
+	 * sp->packet_count + 1 arrive next).
 	 */
-	if (sp->cnt_error > 0)
-	    sp->cnt_error--;
+	if (pcount >= sp->packet_count + 1) {
+
+	    /* Forward, but is there a gap in sequence numbers? */
+	    if (pcount > sp->packet_count + 1) {
+		/* There's a gap so count that as a loss. */
+		sp->cnt_error += (pcount - 1) - sp->packet_count;
+	    }
+	    /* Update the highest sequence number seen so far. */
+	    sp->packet_count = pcount;
+	} else {
+
+	    /* 
+	     * Sequence number went backward (or was stationary?!?).
+	     * This counts as an out-of-order packet.
+	     */
+	    sp->outoforder_packets++;
+
+	    /*
+	     * If we have lost packets, then the fact that we are now
+	     * seeing an out-of-order packet offsets a prior sequence
+	     * number gap that was counted as a loss.  So we can take
+	     * away a loss.
+	     */
+	    if (sp->cnt_error > 0)
+		sp->cnt_error--;
 	
-	/* Log the out-of-order packet */
-	if (sp->test->debug) 
-	    fprintf(stderr, "OUT OF ORDER - incoming packet sequence %llu but expected sequence %d on stream %d", pcount, sp->packet_count, sp->socket);
+	    /* Log the out-of-order packet */
+	    if (sp->test->debug) 
+		fprintf(stderr, "OUT OF ORDER - incoming packet sequence %" PRIu64 " but expected sequence %d on stream %d", pcount, sp->packet_count, sp->socket);
+	}
+
+	/*
+	 * jitter measurement
+	 *
+	 * This computation is based on RFC 1889 (specifically
+	 * sections 6.3.1 and A.8).
+	 *
+	 * Note that synchronized clocks are not required since
+	 * the source packet delta times are known.  Also this
+	 * computation does not require knowing the round-trip
+	 * time.
+	 */
+	iperf_time_now(&arrival_time);
+
+	iperf_time_diff(&arrival_time, &sent_time, &temp_time);
+	transit = iperf_time_in_secs(&temp_time);
+	d = transit - sp->prev_transit;
+	if (d < 0)
+	    d = -d;
+	sp->prev_transit = transit;
+	sp->jitter += (d - sp->jitter) / 16.0;
     }
-
-    /*
-     * jitter measurement
-     *
-     * This computation is based on RFC 1889 (specifically
-     * sections 6.3.1 and A.8).
-     *
-     * Note that synchronized clocks are not required since
-     * the source packet delta times are known.  Also this
-     * computation does not require knowing the round-trip
-     * time.
-     */
-    gettimeofday(&arrival_time, NULL);
-
-    transit = timeval_diff(&sent_time, &arrival_time);
-    d = transit - sp->prev_transit;
-    if (d < 0)
-        d = -d;
-    sp->prev_transit = transit;
-    sp->jitter += (d - sp->jitter) / 16.0;
+    else {
+	if (sp->test->debug)
+	    printf("Late receive, state = %d\n", sp->test->state);
+    }
 
     return r;
 }
@@ -177,9 +191,9 @@ iperf_udp_send(struct iperf_stream *sp)
 {
     int r;
     int       size = sp->settings->blksize;
-    struct timeval before;
+    struct iperf_time before;
 
-    gettimeofday(&before, 0);
+    iperf_time_now(&before);
 
     ++sp->packet_count;
 
@@ -188,8 +202,8 @@ iperf_udp_send(struct iperf_stream *sp)
 	uint32_t  sec, usec;
 	uint64_t  pcount;
 
-	sec = htonl(before.tv_sec);
-	usec = htonl(before.tv_usec);
+	sec = htonl(before.secs);
+	usec = htonl(before.usecs);
 	pcount = htobe64(sp->packet_count);
 	
 	memcpy(sp->buffer, &sec, sizeof(sec));
@@ -201,8 +215,8 @@ iperf_udp_send(struct iperf_stream *sp)
 
 	uint32_t  sec, usec, pcount;
 
-	sec = htonl(before.tv_sec);
-	usec = htonl(before.tv_usec);
+	sec = htonl(before.secs);
+	usec = htonl(before.usecs);
 	pcount = htonl(sp->packet_count);
 	
 	memcpy(sp->buffer, &sec, sizeof(sec));
@@ -220,7 +234,7 @@ iperf_udp_send(struct iperf_stream *sp)
     sp->result->bytes_sent_this_interval += r;
 
     if (sp->test->debug)
-	printf("sent %d bytes of %d, total %llu\n", r, sp->settings->blksize, sp->result->bytes_sent);
+	printf("sent %d bytes of %d, total %" PRIu64 "\n", r, sp->settings->blksize, sp->result->bytes_sent);
 
     return r;
 }

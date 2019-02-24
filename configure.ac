@@ -1,4 +1,4 @@
-# iperf, Copyright (c) 2014, 2015, 2016, 2017, The Regents of the University of
+# iperf, Copyright (c) 2014-2018, The Regents of the University of
 # California, through Lawrence Berkeley National Laboratory (subject
 # to receipt of any required approvals from the U.S. Dept. of
 # Energy).  All rights reserved.
@@ -24,7 +24,7 @@
 # file for complete information.
 
 # Initialize the autoconf system for the specified tool, version and mailing list
-AC_INIT(iperf, 3-CURRENT, https://github.com/esnet/iperf, iperf, http://software.es.net/iperf/)
+AC_INIT(iperf, 3.6+, https://github.com/esnet/iperf, iperf, https://software.es.net/iperf/)
 m4_include([config/ax_check_openssl.m4])
 AC_LANG(C)
 
@@ -34,7 +34,7 @@ AC_CONFIG_AUX_DIR(config)
 
 
 # Initialize the automake system
-AM_INIT_AUTOMAKE
+AM_INIT_AUTOMAKE([foreign])
 AM_MAINTAINER_MODE
 AM_CONFIG_HEADER(src/iperf_config.h)
 
@@ -52,6 +52,13 @@ if test "x$GCC" = "xyes"; then
   CFLAGS="$CFLAGS -Wall"
 fi
 
+# Check if profiling must be disabled
+AC_ARG_ENABLE([profiling],
+    AS_HELP_STRING([--disable-profiling], [Disable iperf profiling binary]),
+    [:],
+    [enable_profiling=yes])
+AM_CONDITIONAL([ENABLE_PROFILING], [test x$enable_profiling = xyes])
+
 # Checks for header files.
 AC_HEADER_STDC
 
@@ -61,12 +68,6 @@ AC_HEADER_STDC
 # Check for the math library (needed by cjson on some platforms)
 AC_SEARCH_LIBS(floor, [m], [], [
 echo "floor()"
-exit 1
-])
-
-# Solaris puts nanosleep in -lrt
-AC_SEARCH_LIBS(nanosleep, [rt], [], [
-echo "nanosleep() required for timing operations."
 exit 1
 ])
 
@@ -100,6 +101,14 @@ AC_CHECK_HEADERS([netinet/sctp.h],
 #include <sys/socket.h>
 #endif
 ])
+
+AC_CHECK_HEADER([endian.h],
+		AC_DEFINE([HAVE_ENDIAN_H], [1], [Define to 1 if you have the <endian.h> header file.]),
+		AC_CHECK_HEADER([sys/endian.h],
+				AC_DEFINE([HAVE_SYS_ENDIAN_H], [1], [Define to 1 if you have the <sys/endian.h> header file.]),
+				AC_MSG_WARN([Couldn't find endian.h or sys/endian.h files: doing compile-time tests.])
+				)
+		)
 
 if test "x$with_openssl" = "xno"; then
     AC_MSG_WARN( [Building without OpenSSL; disabling iperf_auth functionality.] )
@@ -151,14 +160,21 @@ fi
 # FreeBSD uses cpuset_setaffinity while Linux uses sched_setaffinity.
 # Define HAVE_CPU_AFFINITY to indicate the CPU affinity setting as a
 # generic concept is available.
-AC_CHECK_FUNCS([cpuset_setaffinity sched_setaffinity],
+AC_CHECK_FUNCS([cpuset_setaffinity sched_setaffinity SetProcessAffinityMask],
 	       AC_DEFINE([HAVE_CPU_AFFINITY], [1], 
 	 	         [Have CPU affinity support.]))
+
+# Check for daemon().  Most systems have this but a few (IRIX) don't.
+AC_CHECK_FUNCS([daemon])
 
 # Check for sendfile support.  FreeBSD, Linux, and MacOS all support
 # this system call, but they're all different in terms of what headers
 # it needs and what arguments it expects.
 AC_CHECK_FUNCS([sendfile])
+
+# Check for getline support, used as a part of authenticated
+# connections.
+AC_CHECK_FUNCS([getline])
 
 # Check for packet pacing socket option (Linux only for now).
 AC_CACHE_CHECK([SO_MAX_PACING_RATE socket option],
@@ -173,5 +189,9 @@ if test "x$iperf3_cv_header_so_max_pacing_rate" = "xyes"; then
     AC_DEFINE([HAVE_SO_MAX_PACING_RATE], [1], [Have SO_MAX_PACING_RATE sockopt.])
 fi
 
+# Check if we need -lrt for clock_gettime
+AC_SEARCH_LIBS(clock_gettime, [rt posix4])
+# Check for clock_gettime support
+AC_CHECK_FUNCS([clock_gettime])
 
 AC_OUTPUT([Makefile src/Makefile src/version.h examples/Makefile iperf3.spec])

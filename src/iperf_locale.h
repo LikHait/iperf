@@ -1,5 +1,5 @@
 /*
- * iperf, Copyright (c) 2014, 2017, The Regents of the University of
+ * iperf, Copyright (c) 2014-2018, The Regents of the University of
  * California, through Lawrence Berkeley National Laboratory (subject
  * to receipt of any required approvals from the U.S. Dept. of
  * Energy).  All rights reserved.
@@ -64,10 +64,15 @@ extern const char report_done[] ;
 extern const char report_read_lengths[] ;
 extern const char report_read_length_times[] ;
 extern const char report_bw_header[] ;
+extern const char report_bw_header_bidir[] ;
 extern const char report_bw_retrans_header[] ;
+extern const char report_bw_retrans_header_bidir[] ;
 extern const char report_bw_retrans_cwnd_header[] ;
+extern const char report_bw_retrans_cwnd_header_bidir[] ;
 extern const char report_bw_udp_header[] ;
+extern const char report_bw_udp_header_bidir[] ;
 extern const char report_bw_udp_sender_header[] ;
+extern const char report_bw_udp_sender_header_bidir[] ;
 extern const char report_bw_format[] ;
 extern const char report_bw_retrans_format[] ;
 extern const char report_bw_retrans_cwnd_format[] ;
@@ -96,7 +101,9 @@ extern const char report_remote[] ;
 extern const char report_sender[] ;
 extern const char report_receiver[] ;
 extern const char report_sender_not_available_format[];
+extern const char report_sender_not_available_summary_format[];
 extern const char report_receiver_not_available_format[];
+extern const char report_receiver_not_available_summary_format[];
 
 extern const char report_tcpInfo[] ;
 extern const char report_tcpInfo[] ;

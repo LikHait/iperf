@@ -1,5 +1,5 @@
 /*
- * iperf, Copyright (c) 2014, 2015, 2016, 2017, The Regents of the University of
+ * iperf, Copyright (c) 2014-2018 The Regents of the University of
  * California, through Lawrence Berkeley National Laboratory (subject
  * to receipt of any required approvals from the U.S. Dept. of
  * Energy).  All rights reserved.
@@ -40,7 +40,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
-#include <pthread.h>
 #ifdef HAVE_STDINT_H
 #include <stdint.h>
 #endif
@@ -55,9 +54,9 @@
 #include "iperf_tcp.h"
 #include "iperf_util.h"
 #include "timer.h"
+#include "iperf_time.h"
 #include "net.h"
 #include "units.h"
-#include "tcp_window_size.h"
 #include "iperf_util.h"
 #include "iperf_locale.h"
 
@@ -90,10 +89,10 @@ iperf_server_listen(struct iperf_test *test)
     if (!test->json_output) {
 	iperf_printf(test, "-----------------------------------------------------------\n");
 	iperf_printf(test, "Server listening on %d\n", test->server_port);
-    }
-
-    if (!test->json_output)
 	iperf_printf(test, "-----------------------------------------------------------\n");
+	if (test->forceflush)
+	    iflush(test);
+    }
 
     FD_ZERO(&test->read_set);
     FD_ZERO(&test->write_set);
@@ -224,73 +223,8 @@ iperf_handle_message_server(struct iperf_test *test)
     return 0;
 }
 
-/* XXX: This function is not used anymore */
-void
-iperf_test_reset(struct iperf_test *test)
-{
-    struct iperf_stream *sp;
-
-    close(test->ctrl_sck);
-
-    /* Free streams */
-    while (!SLIST_EMPTY(&test->streams)) {
-        sp = SLIST_FIRST(&test->streams);
-        SLIST_REMOVE_HEAD(&test->streams, streams);
-        iperf_free_stream(sp);
-    }
-    if (test->timer != NULL) {
-	tmr_cancel(test->timer);
-	test->timer = NULL;
-    }
-    if (test->stats_timer != NULL) {
-	tmr_cancel(test->stats_timer);
-	test->stats_timer = NULL;
-    }
-    if (test->reporter_timer != NULL) {
-	tmr_cancel(test->reporter_timer);
-	test->reporter_timer = NULL;
-    }
-    test->done = 0;
-
-    SLIST_INIT(&test->streams);
-
-    test->role = 's';
-    set_protocol(test, Ptcp);
-    test->omit = OMIT;
-    test->duration = DURATION;
-    test->diskfile_name = (char*) 0;
-    test->affinity = -1;
-    test->server_affinity = -1;
-    test->title = NULL;
-    test->congestion = NULL;
-    test->state = 0;
-    test->server_hostname = NULL;
-
-    test->ctrl_sck = -1;
-    test->prot_listener = -1;
-
-    test->bytes_sent = 0;
-
-    test->reverse = 0;
-    test->sender = 0;
-    test->sender_has_retransmits = 0;
-    test->no_delay = 0;
-
-    FD_ZERO(&test->read_set);
-    FD_ZERO(&test->write_set);
-    FD_SET(test->listener, &test->read_set);
-    test->max_fd = test->listener;
-    
-    test->num_streams = 1;
-    test->settings->socket_bufsize = 0;
-    test->settings->blksize = DEFAULT_TCP_BLKSIZE;
-    test->settings->rate = 0;
-    test->settings->mss = 0;
-    memset(test->cookie, 0, COOKIE_SIZE); 
-}
-
 static void
-server_timer_proc(TimerClientData client_data, struct timeval *nowP)
+server_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 {
     struct iperf_test *test = client_data.p;
     struct iperf_stream *sp;
@@ -310,7 +244,7 @@ server_timer_proc(TimerClientData client_data, struct timeval *nowP)
 }
 
 static void
-server_stats_timer_proc(TimerClientData client_data, struct timeval *nowP)
+server_stats_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 {
     struct iperf_test *test = client_data.p;
 
@@ -321,7 +255,7 @@ server_stats_timer_proc(TimerClientData client_data, struct timeval *nowP)
 }
 
 static void
-server_reporter_timer_proc(TimerClientData client_data, struct timeval *nowP)
+server_reporter_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 {
     struct iperf_test *test = client_data.p;
 
@@ -334,10 +268,10 @@ server_reporter_timer_proc(TimerClientData client_data, struct timeval *nowP)
 static int
 create_server_timers(struct iperf_test * test)
 {
-    struct timeval now;
+    struct iperf_time now;
     TimerClientData cd;
 
-    if (gettimeofday(&now, NULL) < 0) {
+    if (iperf_time_now(&now) < 0) {
 	i_errno = IEINITTEST;
 	return -1;
     }
@@ -371,7 +305,7 @@ create_server_timers(struct iperf_test * test)
 }
 
 static void
-server_omit_timer_proc(TimerClientData client_data, struct timeval *nowP)
+server_omit_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 {   
     struct iperf_test *test = client_data.p;
 
@@ -391,14 +325,14 @@ server_omit_timer_proc(TimerClientData client_data, struct timeval *nowP)
 static int
 create_server_omit_timer(struct iperf_test * test)
 {
-    struct timeval now;
+    struct iperf_time now;
     TimerClientData cd; 
 
     if (test->omit == 0) {
 	test->omit_timer = NULL;
 	test->omitting = 0;
     } else {
-	if (gettimeofday(&now, NULL) < 0) {
+	if (iperf_time_now(&now) < 0) {
 	    i_errno = IEINITTEST;
 	    return -1; 
 	}
@@ -452,11 +386,17 @@ cleanup_server(struct iperf_test *test)
 int
 iperf_run_server(struct iperf_test *test)
 {
-    int result, s, streams_accepted;
+    int result, s;
+    int send_streams_accepted, rec_streams_accepted;
+    int streams_to_send = 0, streams_to_rec = 0;
+#if defined(HAVE_TCP_CONGESTION)
+    int saved_errno;
+#endif /* HAVE_TCP_CONGESTION */
     fd_set read_set, write_set;
     struct iperf_stream *sp;
-    struct timeval now;
+    struct iperf_time now;
     struct timeval* timeout;
+    int flag;
 
     if (test->affinity != -1) 
 	if (iperf_setaffinity(test, test->affinity) != 0)
@@ -485,14 +425,15 @@ iperf_run_server(struct iperf_test *test)
     cpu_util(NULL);
 
     test->state = IPERF_START;
-    streams_accepted = 0;
+    send_streams_accepted = 0;
+    rec_streams_accepted = 0;
 
     while (test->state != IPERF_DONE) {
 
         memcpy(&read_set, &test->read_set, sizeof(fd_set));
         memcpy(&write_set, &test->write_set, sizeof(fd_set));
 
-	(void) gettimeofday(&now, NULL);
+	iperf_time_now(&now);
 	timeout = tmr_timeout(&now);
         result = select(test->max_fd + 1, &read_set, &write_set, NULL, timeout);
         if (result < 0 && errno != EINTR) {
@@ -508,6 +449,18 @@ iperf_run_server(struct iperf_test *test)
                         return -1;
                     }
                     FD_CLR(test->listener, &read_set);
+
+                    // Set streams number
+                    if (test->mode == BIDIRECTIONAL) {
+                        streams_to_send = test->num_streams;
+                        streams_to_rec = test->num_streams;
+                    } else if (test->mode == RECEIVER) {
+                        streams_to_rec = test->num_streams;
+                        streams_to_send = 0;
+                    } else {
+                        streams_to_send = test->num_streams;
+                        streams_to_rec = 0;
+                    }
                 }
             }
             if (FD_ISSET(test->ctrl_sck, &read_set)) {
@@ -543,8 +496,10 @@ iperf_run_server(struct iperf_test *test)
 				    warning("TCP congestion control algorithm not supported");
 				}
 				else {
+				    saved_errno = errno;
 				    close(s);
 				    cleanup_server(test);
+				    errno = saved_errno;
 				    i_errno = IESETCONGESTION;
 				    return -1;
 				}
@@ -554,8 +509,10 @@ iperf_run_server(struct iperf_test *test)
 			    socklen_t len = TCP_CA_NAME_MAX;
 			    char ca[TCP_CA_NAME_MAX + 1];
 			    if (getsockopt(s, IPPROTO_TCP, TCP_CONGESTION, ca, &len) < 0) {
+				saved_errno = errno;
 				close(s);
 				cleanup_server(test);
+				errno = saved_errno;
 				i_errno = IESETCONGESTION;
 				return -1;
 			    }
@@ -568,37 +525,51 @@ iperf_run_server(struct iperf_test *test)
 #endif /* HAVE_TCP_CONGESTION */
 
                     if (!is_closed(s)) {
-                        sp = iperf_new_stream(test, s);
-                        if (!sp) {
-			    cleanup_server(test);
-                            return -1;
-			}
 
-			if (test->sender)
-			    FD_SET(s, &test->write_set);
-			else
-			    FD_SET(s, &test->read_set);
-			if (s > test->max_fd) test->max_fd = s;
+                        if (rec_streams_accepted != streams_to_rec) {
+                            flag = 0;
+                            ++rec_streams_accepted;
+                        } else if (send_streams_accepted != streams_to_send) {
+                            flag = 1;
+                            ++send_streams_accepted;
+                        }
 
-			/* 
-			 * If the protocol isn't UDP, or even if it is but
-			 * we're the receiver, set nonblocking sockets.
-			 * We need this to allow a server receiver to
-			 * maintain interactivity with the control channel.
-			 */
-			if (test->protocol->id != Pudp ||
-			    !test->sender) {
-			    setnonblocking(s, 1);
-			}
+                        if (flag != -1) {
+                            sp = iperf_new_stream(test, s, flag);
+                            if (!sp) {
+                                cleanup_server(test);
+                                return -1;
+                            }
 
-                        streams_accepted++;
-                        if (test->on_new_stream)
-                            test->on_new_stream(sp);
+                            if (sp->sender)
+                                FD_SET(s, &test->write_set);
+                            else
+                                FD_SET(s, &test->read_set);
+
+                            if (s > test->max_fd) test->max_fd = s;
+
+                            /*
+                             * If the protocol isn't UDP, or even if it is but
+                             * we're the receiver, set nonblocking sockets.
+                             * We need this to allow a server receiver to
+                             * maintain interactivity with the control channel.
+                             */
+                            if (test->protocol->id != Pudp ||
+                                !sp->sender) {
+                                setnonblocking(s, 1);
+                            }
+
+                            if (test->on_new_stream)
+                                test->on_new_stream(sp);
+
+                            flag = -1;
+                        }
                     }
                     FD_CLR(test->prot_listener, &read_set);
                 }
 
-                if (streams_accepted == test->num_streams) {
+
+                if (rec_streams_accepted == streams_to_rec && send_streams_accepted == streams_to_send) {
                     if (test->protocol->id != Ptcp) {
                         FD_CLR(test->prot_listener, &test->read_set);
                         close(test->prot_listener);
@@ -634,7 +605,7 @@ iperf_run_server(struct iperf_test *test)
 			cleanup_server(test);
                         return -1;
 		    }
-		    if (test->reverse)
+		    if (test->mode != RECEIVER)
 			if (iperf_create_send_timers(test) < 0) {
 			    cleanup_server(test);
 			    return -1;
@@ -647,7 +618,16 @@ iperf_run_server(struct iperf_test *test)
             }
 
             if (test->state == TEST_RUNNING) {
-                if (test->reverse) {
+                if (test->mode == BIDIRECTIONAL) {
+                    if (iperf_recv(test, &read_set) < 0) {
+                        cleanup_server(test);
+                        return -1;
+                    }
+                    if (iperf_send(test, &write_set) < 0) {
+                        cleanup_server(test);
+                        return -1;
+                    }
+                } else if (test->mode == SENDER) {
                     // Reverse mode. Server sends.
                     if (iperf_send(test, &write_set) < 0) {
 			cleanup_server(test);
@@ -666,7 +646,7 @@ iperf_run_server(struct iperf_test *test)
 	if (result == 0 ||
 	    (timeout != NULL && timeout->tv_sec == 0 && timeout->tv_usec == 0)) {
 	    /* Run the timers. */
-	    (void) gettimeofday(&now, NULL);
+	    iperf_time_now(&now);
 	    tmr_run(&now);
 	}
     }
