@@ -529,13 +529,15 @@ iperf_run_server(struct iperf_test *test)
                         if (rec_streams_accepted != streams_to_rec) {
                             flag = 0;
                             ++rec_streams_accepted;
-                        } else if (send_streams_accepted != streams_to_send) {
+                        } else if (send_streams_accepted != streams_to_send && test->mode != BIDIRECTIONAL) {
                             flag = 1;
                             ++send_streams_accepted;
                         }
 
                         if (flag != -1) {
                             sp = iperf_new_stream(test, s, flag);
+                            if (test->mode == BIDIRECTIONAL)
+                                sp = iperf_new_stream(test, s, !flag);
                             if (!sp) {
                                 cleanup_server(test);
                                 return -1;
