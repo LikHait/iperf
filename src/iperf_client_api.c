@@ -73,7 +73,7 @@ iperf_create_streams(struct iperf_test *test, int sender)
 		}
 		else {
 			tmp_sp = (&test->streams)->slh_first;
-			for (j = 0; j < i; ++i)
+			for (j = 0; j < i; ++j) 
 				tmp_sp = tmp_sp->streams.sle_next;
 			s = tmp_sp->socket;
 		}
